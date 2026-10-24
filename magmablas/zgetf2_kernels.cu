@@ -828,7 +828,148 @@ magma_int_t magma_zcomputecolumn_batched( magma_int_t m, magma_int_t paneloffset
 }
 
 /******************************************************************************/
-template<int N>
+#if defined(PRECISION_z) || defined(PRECISION_d)
+// magma-hpc opt-closed G2 (2026-10-24): the panel factorization of zgetf2_fused_device with the pivot search on the
+// INTEGER pipe and 2 block barriers per column instead of ~10-13. Same arithmetic, same pivots -> same bits.
+// Only for one matrix per block (blockDim.y == 1, i.e. m >= 32); the driver launches it only then.
+// (a) Pivot search: |re| + |im| >= 0 is never -0, and for non-negative IEEE doubles the order of the 64-bit patterns is
+//     the numeric order, so the lexicographic maximum (largest key, then smallest row position) over the rows at
+//     positions >= i is exactly the result of the released smem tree (magma_getidmax_n: "x[i] < x[i+s] || (x[i] ==
+//     x[i+s] && ind[i+s] < ind[i])"), which for NaN-free input selects that same maximum whatever the tree shape.
+//     Each thread offers (key of its row, row position) from registers; a warp shuffle tree, then one barrier, then
+//     every thread reduces the per-warp winners (<= 32) itself. The selection is a total order on distinct
+//     (key, position) pairs, so the shape of these trees does not matter.
+// (b) NaN: the released tree is NOT order-independent with NaN (a NaN in the left slot keeps it, a NaN never enters
+//     from the right). If any participating row of this column holds a NaN (warp ballot, OR over the warps, uniform
+//     over the block), the column falls back to the released tree on dsx/isx, which are still written for that case.
+// (c) Barriers: the released barrier after the sipiv write and the one after the rowid relabel protect nothing (sipiv
+//     is read after the loop, rowid is a register); the leading barrier of the next column orders the previous
+//     column's sx reads against the next pivot-row copy, as in the released code.
+template<int WIDTH>
+static __device__ __inline__
+void
+zgetf2_fused_device_g2( int m, int minmn, magmaDoubleComplex rA[WIDTH], magma_int_t* dipiv,
+                        magmaDoubleComplex* swork, int &linfo, int gbstep, int &rowid)
+{
+    const int tx = threadIdx.x;
+
+    magmaDoubleComplex reg       = MAGMA_Z_ZERO;
+
+    int max_id;
+    double rx_abs_max = MAGMA_D_ZERO;
+
+    magmaDoubleComplex *sx = (magmaDoubleComplex*)(swork);
+    double* dsx = (double*)(sx + WIDTH);
+    int* isx    = (int*)(dsx + m);
+    int* sipiv  = (int*)(isx + m);
+
+    // per-warp winners of the pivot search
+    __shared__ long long g2_wkey[32];
+    __shared__ int       g2_widx[32];
+    __shared__ int       g2_wnan[32];
+
+    const int lane = tx & 31;
+    const int wid  = tx >> 5;
+    const int nw   = (m + 31) >> 5;
+    const int nl   = min(32, m - (wid << 5));                      // lanes present in this warp
+    const unsigned wmask = (nl == 32) ? 0xffffffffu : ((1u << nl) - 1u);
+
+    rowid = tx;
+
+    // init sipiv
+    if(tx < WIDTH){
+        sipiv[tx] = 0;
+    }
+
+    #pragma unroll
+    for(int i = 0; i < WIDTH; i++){
+        // izamax and find pivot
+        const double ax = fabs(MAGMA_Z_REAL( rA[i] )) + fabs(MAGMA_Z_IMAG( rA[i] ));
+        dsx[ rowid ] = ax;          // kept for the NaN fallback (released tree)
+        isx[ tx ] = tx;
+        const bool part = ( rowid >= i );
+        long long key = part ? __double_as_longlong( ax ) : -1LL;
+        int       kid = part ? rowid : 0x7fffffff;
+        const unsigned wnan = __ballot_sync(wmask, part && (ax != ax));
+        #pragma unroll
+        for(int s = 16; s >= 1; s >>= 1){
+            const long long okey = __shfl_down_sync(wmask, key, s);
+            const int       oid  = __shfl_down_sync(wmask, kid, s);
+            if( lane + s < nl && ( okey > key || ( okey == key && oid < kid ) ) ){
+                key = okey;
+                kid = oid;
+            }
+        }
+        if(lane == 0){
+            g2_wkey[wid] = key;
+            g2_widx[wid] = kid;
+            g2_wnan[wid] = (wnan != 0u);
+        }
+        __syncthreads();
+        long long kmax = g2_wkey[0];
+        max_id = g2_widx[0];
+        int anynan = g2_wnan[0];
+        for(int w = 1; w < nw; w++){
+            const long long kw = g2_wkey[w];
+            const int       iw = g2_widx[w];
+            if( kw > kmax || ( kw == kmax && iw < max_id ) ){
+                kmax   = kw;
+                max_id = iw;
+            }
+            anynan |= g2_wnan[w];
+        }
+        if( anynan ){               // uniform over the block: released tree, released NaN semantics
+            magma_getidmax_n(m-i, tx, dsx+i, isx+i); // this devfunc has syncthreads at the end
+            rx_abs_max = dsx[i];
+            max_id = isx[i];
+        }
+        else{
+            rx_abs_max = __longlong_as_double( kmax );
+        }
+        linfo  = ( rx_abs_max == MAGMA_D_ZERO && linfo == 0) ? (gbstep+i+1) : linfo;
+        if(tx == 0) {
+            sipiv[i] = max_id;
+        }
+
+        if( rowid == max_id ) {
+            #pragma unroll
+            for(int j = 0; j < WIDTH; j++){
+                sx[j] = rA[j];
+            }
+        }
+        __syncthreads();
+
+        if( rx_abs_max != MAGMA_D_ZERO ) {
+            if(rowid == max_id){
+                rowid = i;
+            }
+            else if(rowid == i){
+                rowid = max_id;
+            }
+        }
+
+        reg = (rx_abs_max == MAGMA_D_ZERO ) ? MAGMA_Z_ONE : MAGMA_Z_DIV(MAGMA_Z_ONE, sx[i] );
+        // scal and ger
+        if( rowid > i ){
+            rA[i] *= reg;
+            #pragma unroll
+            for(int j = i+1; j < WIDTH; j++){
+                rA[j] -= rA[i] * sx[j];
+            }
+        }
+    }
+
+    // write
+    if(tx < minmn){
+        dipiv[tx] = (magma_int_t)(sipiv[tx] + 1); // fortran indexing
+    }
+}
+#endif
+
+
+/******************************************************************************/
+// G2 = true: zgetf2_fused_device_g2 (z/d only, blockDim.y == 1); false: the released zgetf2_fused_device
+template<int N, bool G2>
 __global__ void
 zgetf2_fused_kernel_batched( int m,
                            magmaDoubleComplex** dA_array, int ai, int aj, int ldda,
@@ -853,10 +994,21 @@ zgetf2_fused_kernel_batched( int m,
         rA[i] = dA[ i * ldda + tx ];
     }
 
+#if defined(PRECISION_z) || defined(PRECISION_d)
+    if( G2 ){
+        zgetf2_fused_device_g2<N>(
+             m, min(m,N), rA,
+             dipiv_array[batchid] + ai,
+             swork, linfo, gbstep, rowid);
+    }
+    else
+#endif
+    {
      zgetf2_fused_device<N>(
              m, min(m,N), rA,
              dipiv_array[batchid] + ai,
              swork, linfo, gbstep, rowid);
+    }
 
     // write
     if(tx == 0){
@@ -901,7 +1053,10 @@ magma_zgetf2_fused_kernel_driver_batched(
     #if CUDA_VERSION >= 9000
     cudaDeviceGetAttribute (&shmem_max, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
     if (shmem <= shmem_max) {
-        cudaFuncSetAttribute(zgetf2_fused_kernel_batched<N>, cudaFuncAttributeMaxDynamicSharedMemorySize, shmem);
+        cudaFuncSetAttribute(zgetf2_fused_kernel_batched<N, false>, cudaFuncAttributeMaxDynamicSharedMemorySize, shmem);
+        #if defined(PRECISION_z) || defined(PRECISION_d)
+        cudaFuncSetAttribute(zgetf2_fused_kernel_batched<N, true>, cudaFuncAttributeMaxDynamicSharedMemorySize, shmem);
+        #endif
     }
     #else
     cudaDeviceGetAttribute (&shmem_max, cudaDevAttrMaxSharedMemoryPerBlock, device);
@@ -915,7 +1070,12 @@ magma_zgetf2_fused_kernel_driver_batched(
     }
 
     void *kernel_args[] = {&m, &dA_array, &ai, &aj, &ldda, &dipiv_array, &info_array, &batchCount};
-    cudaError_t e = cudaLaunchKernel((void*)zgetf2_fused_kernel_batched<N>, grid, threads, kernel_args, shmem, queue->cuda_stream());
+    void* kfunc = (void*)zgetf2_fused_kernel_batched<N, false>;
+    #if defined(PRECISION_z) || defined(PRECISION_d)
+    // magma-hpc G2: one matrix per block -> integer-key pivot search with 2 barriers per column
+    if( ntcol == 1 ) kfunc = (void*)zgetf2_fused_kernel_batched<N, true>;
+    #endif
+    cudaError_t e = cudaLaunchKernel(kfunc, grid, threads, kernel_args, shmem, queue->cuda_stream());
     if( e != cudaSuccess ) {
         //printf("error in %s : failed to launch kernel %s\n", __func__, cudaGetErrorString(e));
         arginfo = -100;
