@@ -919,6 +919,9 @@ zgetf2_fused_device_g2( int m, int minmn, magmaDoubleComplex rA[WIDTH], magma_in
         long long kmax = g2_wkey[0];
         max_id = g2_widx[0];
         int anynan = g2_wnan[0];
+        // G2c (c): not unrolled. Fully unrolled (nw <= 32 is not known at compile time) this loop was 31 guarded copies
+        // x 32 columns = ~12k of the G2 kernel's SASS instructions (ISETP/SEL/LDS); the trip count is nw - 1 <= 7 on the corpus.
+        #pragma unroll 1
         for(int w = 1; w < nw; w++){
             const long long kw = g2_wkey[w];
             const int       iw = g2_widx[w];
