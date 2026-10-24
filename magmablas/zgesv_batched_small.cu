@@ -56,6 +56,72 @@ zgesv_batched_small_device(
     magmaDoubleComplex reg    = MAGMA_Z_ZERO;
     int max_id;
 
+#if defined(PRECISION_z) || defined(PRECISION_d)
+    // magma-hpc opt-closed G6 (2026-10-24): the G1 change (zgetrf_batched_smallsq_noshfl) applied to the same serial
+    // pivot scan here. Same arithmetic, fewer FP64-pipe instructions:
+    // (a) pivot search on the INTEGER pipe: for non-negative IEEE doubles the order of the 64-bit patterns is the numeric
+    //     order, so "key_j > key_max" picks exactly the row "dsx[j] > rx_abs_max" picks (first strict maximum wins).
+    //     NaN keeps the floating-point semantics: a NaN challenger never wins (key -1 or any negative pattern), a NaN
+    //     start value is never beaten (key LLONG_MAX); the zero test becomes key_max == 0 (|re| + |im| is never -0).
+    // (b) the pivot row is copied raw by its owner and scaled by "update" (0 or 1) once per column by the lanes in
+    //     parallel, instead of N-i serial products in the owner thread (issued by the whole warp). Same product, same
+    //     operands (double update times the element) -> same bits.
+    long long* dsk = (long long*)dsx;
+    #pragma unroll
+    for(int i = 0; i < N; i++){
+        double update = MAGMA_D_ZERO;
+        // izamax and find pivot (integer keys of |re| + |im|)
+        {
+            long long key = __double_as_longlong( fabs(MAGMA_Z_REAL( rA[i] )) + fabs(MAGMA_Z_IMAG( rA[i] )) );
+            dsk[ rowid ] = ( key > 0x7FF0000000000000LL ) ? -1LL : key;    // NaN -> -1
+        }
+        magmablas_syncwarp();
+        long long key_max = dsk[i];
+        key_max = ( key_max < 0 ) ? 0x7FFFFFFFFFFFFFFFLL : key_max;          // NaN start is never beaten
+        max_id = i;
+        #pragma unroll
+        for(int j = i+1; j < N; j++){
+            const long long key_j = dsk[j];
+            if( key_j > key_max){
+                max_id  = j;
+                key_max = key_j;
+            }
+        }
+        bool zero_pivot = ( key_max == 0 );
+        linfo  = ( zero_pivot && linfo == 0) ? (i+1) : linfo;
+        update = ( zero_pivot ) ? MAGMA_D_ZERO : MAGMA_D_ONE;
+
+        if(rowid == max_id){
+            sipiv[i] = max_id;
+            rowid = i;
+            #pragma unroll
+            for(int j = i; j < N; j++){
+                sx[j] = rA[j];
+            }
+            sB[0] = rB;
+        }
+        else if(rowid == i){
+            rowid = max_id;
+        }
+        magmablas_syncwarp();
+        if( tx >= i ){
+            sx[tx] = update * sx[tx];
+        }
+        magmablas_syncwarp();
+
+        reg = ( zero_pivot ) ? MAGMA_Z_ONE : MAGMA_Z_DIV(MAGMA_Z_ONE, sx[i] );
+        // scal and ger
+        if( rowid > i ){
+            rA[i] *= reg;
+            #pragma unroll
+            for(int j = i+1; j < N; j++) {
+                rA[j] -= rA[i] * sx[j];
+            }
+            rB -= rA[i] * sB[0];
+        }
+        magmablas_syncwarp();
+    }
+#else
     #pragma unroll
     for(int i = 0; i < N; i++){
         double rx_abs_max = MAGMA_D_ZERO;
@@ -102,6 +168,7 @@ zgesv_batched_small_device(
         }
         magmablas_syncwarp();
     }
+#endif
 
     sB[rowid] = rB;
     #pragma unroll
