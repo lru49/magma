@@ -845,6 +845,16 @@ magma_int_t magma_zcomputecolumn_batched( magma_int_t m, magma_int_t paneloffset
 // (c) Barriers: the released barrier after the sipiv write and the one after the rowid relabel protect nothing (sipiv
 //     is read after the loop, rowid is a register); the leading barrier of the next column orders the previous
 //     column's sx reads against the next pivot-row copy, as in the released code.
+// magma-hpc G2c (a): the NaN fallback (the released tree, ~13 levels with a block barrier each) as ONE out-of-line
+// function instead of a copy unrolled into each of the WIDTH columns (G2: 33456 SASS instructions vs 13304 released).
+// Called only when anynan (uniform over the block), so its __syncthreads are reached by all threads or by none.
+static __device__ __noinline__
+void
+zgetf2_g2_nan_tree( int n, int tx, double* x, int* ind )
+{
+    magma_getidmax_n(n, tx, x, ind); // this devfunc has syncthreads at the end
+}
+
 template<int WIDTH>
 static __device__ __inline__
 void
@@ -919,7 +929,7 @@ zgetf2_fused_device_g2( int m, int minmn, magmaDoubleComplex rA[WIDTH], magma_in
             anynan |= g2_wnan[w];
         }
         if( anynan ){               // uniform over the block: released tree, released NaN semantics
-            magma_getidmax_n(m-i, tx, dsx+i, isx+i); // this devfunc has syncthreads at the end
+            zgetf2_g2_nan_tree(m-i, tx, dsx+i, isx+i); // out of line (G2c a); syncthreads at the end
             rx_abs_max = dsx[i];
             max_id = isx[i];
         }
