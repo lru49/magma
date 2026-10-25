@@ -13,6 +13,7 @@
 #include "magma_internal.h"
 #include "batched_kernel_param.h"
 #include "zlaswp_device.cuh"
+#include "laswp_rowperm.cuh"   // magma-hpc opt-g7
 
 /******************************************************************************/
 // parallel swap the swaped dA(1:nb,i:n) is stored in dout
@@ -180,6 +181,49 @@ __global__ void zlaswp_rowserial_kernel_native( int n, magmaDoubleComplex_ptr dA
 }
 
 
+
+/******************************************************************************/
+// magma-hpc opt-g7: the rowserial swaps as one permutation gather (see laswp_rowperm.cuh).
+// grid (nblk_x, 1, batch): block x handles columns [x*cols_per_block, min(n, (x+1)*cols_per_block)) of matrix z.
+// Same result as zlaswp_rowserial_kernel_batched, bit for bit: values are only copied, and every row ends up holding
+// the row the sequential swaps would have put there.
+static __global__ void zlaswp_rowperm_kernel_batched(   // static: no new exported symbol (SYMCHECK)
+        int n, magmaDoubleComplex **dA_array, int lda, int k1, int k2,
+        int R, int C, int cols_per_block, magma_int_t** ipiv_array )
+{
+    extern __shared__ __align__(16) unsigned char zlaswp_rp_smem[];
+    magmaDoubleComplex* stile = (magmaDoubleComplex*)zlaswp_rp_smem;
+    int* sperm = (int*)(stile + (size_t)R * C);
+    int* sipiv = sperm + R;
+
+    const int tid = threadIdx.x;
+    const int nth = blockDim.x;
+    magmaDoubleComplex* dA = dA_array[blockIdx.z];
+    const magma_int_t* dipiv = ipiv_array[blockIdx.z];
+    const int c_begin = blockIdx.x * cols_per_block;
+    const int c_end   = min(n, c_begin + cols_per_block);
+    if (c_begin >= c_end) return;                       // uniform over the block
+    const int i_begin = k1 - 1;                         // released loop: i1 = k1-1 .. k2-2
+    const int nsw     = (k2 - 1) - (k1 - 1);
+
+    const int bad = magma_laswp_rp::stage(tid, nth, dipiv, i_begin, nsw, R, sperm, sipiv);
+    if (__syncthreads_or(bad)) {
+        magma_laswp_rp::serial_fallback(tid, nth, dA, lda, k1 - 1, k2 - 1, dipiv, c_begin, c_end);
+        return;
+    }
+    if (tid == 0) magma_laswp_rp::compose(i_begin, nsw, sperm, sipiv);
+    __syncthreads();
+    if (! __syncthreads_or(magma_laswp_rp::any_moved(tid, nth, R, sperm))) return;
+
+    for (int c0 = c_begin; c0 < c_end; c0 += C) {
+        const int cw = min(C, c_end - c0);
+        magma_laswp_rp::load_tile(tid, nth, (const magmaDoubleComplex*)dA, (size_t)lda, c0, cw, R, sperm, stile);
+        __syncthreads();
+        magma_laswp_rp::store_tile(tid, nth, dA, (size_t)lda, c0, cw, R, sperm, stile);
+        __syncthreads();
+    }
+}
+
 /******************************************************************************/
 // serial swap that does swapping one row by one row, similar to LAPACK
 // K1, K2 are in Fortran indexing
@@ -191,12 +235,26 @@ magma_zlaswp_rowserial_batched(magma_int_t n, magmaDoubleComplex** dA_array, mag
 {
     if (n == 0) return;
 
+    // magma-hpc opt-g7: empty swap range (the released kernel's loop would not run) -> nothing to do
+    if (n > 0 && k1 >= 1 && k2 - 1 <= k1 - 1) return;
+
     magma_int_t threads = min(n, MAX_NTHREADS);
     magma_int_t blocks  = magma_ceildiv( n, threads );
     magma_int_t max_batchCount = queue->get_maxBatch();
 
     for(magma_int_t i = 0; i < batchCount; i+=max_batchCount) {
         magma_int_t ibatch = min(max_batchCount, batchCount-i);
+
+        // magma-hpc opt-g7: permutation gather when the window fits (always for getrs: k1 = 1, k2 = n <= 2048)
+        magma_laswp_rp::Config cf;
+        if (magma_laswp_rp::config( n, k1, k2, ibatch, (int)sizeof(magmaDoubleComplex), cf )) {
+            dim3 pgrid(cf.nblk_x, 1, ibatch);
+            zlaswp_rowperm_kernel_batched
+            <<< pgrid, cf.nthreads, cf.smem, queue->cuda_stream() >>>
+            (n, dA_array+i, lda, k1, k2, cf.R, cf.C, cf.cols_per_block, ipiv_array+i);
+            continue;
+        }
+
         dim3  grid(blocks, 1, ibatch);
 
         zlaswp_rowserial_kernel_batched
