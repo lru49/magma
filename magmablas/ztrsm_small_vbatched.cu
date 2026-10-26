@@ -15,6 +15,7 @@
 
 #define PRECISION_z
 #include "trsm_template_kernel_vbatched.cuh"
+#include "trsm_nrhs1_warp.cuh"
 #include "./trsm_config/ztrsm_param.h"
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -27,6 +28,12 @@ magmablas_ztrsm_small_vbatched(
         magmaDoubleComplex **dB_array, magma_int_t Bi, magma_int_t Bj, magma_int_t* lddb,
         magma_int_t batchCount, magma_queue_t queue )
 {
+    // G-TRSV2: nrhs = 1 diagonal-block solve, one warp per matrix (bit-identical to the template kernel below)
+    if( trsm_nrhs1_warp_applies(side, transA, max_m, max_n) ){
+        trsm_nrhs1_warp_vbatched<magmaDoubleComplex>(uplo, diag, m, n, alpha, dA_array, Ai, Aj, ldda, dB_array, Bi, Bj, lddb, max_m, max_n, batchCount, queue );
+        return;
+    }
+
     magma_int_t nrowA = (side == MagmaLeft ? max_m : max_n);
 
     if( side == MagmaLeft ){
