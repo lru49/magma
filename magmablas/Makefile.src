@@ -208,6 +208,7 @@ libmagma_src += \
 	$(cdir)/dsyrk_vbatched_core.cu	\
 	$(cdir)/ztrmm_vbatched_core.cu	\
 	$(cdir)/ztrsm_small_vbatched.cu	\
+	$(cdir)/ztrsm_vbatched_nrhs1.cu	\
 	$(cdir)/ztrsm_inv_vbatched_core.cu	\
 	$(cdir)/ztrtri_diag_vbatched.cu	\
 
