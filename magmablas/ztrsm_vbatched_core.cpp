@@ -10,6 +10,7 @@
        @author Ahmad Abdelfattah
 
 */
+#include <mutex>
 #include "magma_internal.h"
 
 #define PRECISION_z
@@ -342,9 +343,34 @@ ztrsm_vbatched_core_rec(
 }
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
+// G-TRSV1: private stream-ordered pool that keeps its memory (release threshold = max). The default pool
+// (threshold 0) hands memory back at every stream sync, so each cudaMallocAsync cost ~0.4 ms in the
+// JOREK-proxy solve (window 16: 600 calls = 245.7 ms). One pool per device, created on first use; NULL on failure.
+static cudaMemPool_t z_trsm_nrhs1_pool()
+{
+    static std::mutex mtx;
+    static cudaMemPool_t pools[64] = {};
+    int dev = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) { cudaGetLastError(); return NULL; }
+    std::lock_guard<std::mutex> lock(mtx);
+    if (pools[dev] == NULL) {
+        cudaMemPoolProps props = {};
+        props.allocType     = cudaMemAllocationTypePinned;
+        props.location.type = cudaMemLocationTypeDevice;
+        props.location.id   = dev;
+        cudaMemPool_t p = NULL;
+        if (cudaMemPoolCreate(&p, &props) != cudaSuccess) { cudaGetLastError(); return NULL; }
+        cuuint64_t keep = ~(cuuint64_t)0;
+        cudaMemPoolSetAttribute(p, cudaMemPoolAttrReleaseThreshold, &keep);
+        pools[dev] = p;
+    }
+    return pools[dev];
+}
+
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 // G-TRSV1: Left/NoTrans with a single right-hand side (max_n == 1) does its off-diagonal updates as batched gemv.
-// The pointer/extent workspace is stream-ordered (cudaMallocAsync/cudaFreeAsync on the queue's stream): no host sync,
+// The pointer/extent workspace is stream-ordered (cudaMallocFromPoolAsync/cudaFreeAsync on the queue's stream, private
+// pool above): no host sync,
 // the call stays fully asynchronous. If the allocation fails the original gemm path is used.
 extern "C" void
 magmablas_ztrsm_vbatched_core(
@@ -360,7 +386,8 @@ magmablas_ztrsm_vbatched_core(
         max_m > magma_get_ztrsm_batched_stop_nb(side, max_m, max_n))   // at least one update happens
     {
         cudaStream_t st = magma_queue_get_cuda_stream(queue);
-        if (cudaMallocAsync(&ws, magma_ztrsm_nrhs1_ws_bytes(batchCount), st) != cudaSuccess) { ws = NULL; cudaGetLastError(); }
+        cudaMemPool_t pool = z_trsm_nrhs1_pool();
+        if (pool == NULL || cudaMallocFromPoolAsync(&ws, magma_ztrsm_nrhs1_ws_bytes(batchCount), pool, st) != cudaSuccess) { ws = NULL; cudaGetLastError(); }
     }
     ztrsm_vbatched_core_rec(side, uplo, transA, diag, max_m, max_n, m, n, alpha,
                             dA_array, Ai, Aj, ldda, dB_array, Bi, Bj, lddb, batchCount, queue, ws);
