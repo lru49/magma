@@ -102,8 +102,9 @@ gemvn_split_kernel_vbatched(
     int INCX = (int)incx[batchid];
     T* part  = ws + ((size_t)batchid * S + blockIdx.y) * ldw;
 
-    int tx = threadIdx.x % DIM_X;     // same thread mapping as gemvn_template_device
-    int ty = threadIdx.x / DIM_X;
+    int thread_id = threadIdx.x + threadIdx.y * blockDim.x;   // 2-D block (DIM_X, DIM_Y), as in gemvn_template_device
+    int tx = thread_id % DIM_X;
+    int ty = thread_id / DIM_X;
     __shared__ T sdata[DIM_X * DIM_Y];
 
     int st  = blockIdx.x * TILE_SIZE;
