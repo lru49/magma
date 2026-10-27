@@ -13,7 +13,7 @@
 #include "magma_internal.h"
 #include "batched_kernel_param.h"
 
-extern "C" magma_int_t
+extern "C" __attribute__((visibility("hidden"))) magma_int_t
 magma_zgetf2_tall_vbatched(
     magma_int_t max_m, magma_int_t max_n,
     magma_int_t *m, magma_int_t *n,

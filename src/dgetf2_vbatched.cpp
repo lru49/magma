@@ -8,12 +8,12 @@
    @author Azzam Haidar
    @author Tingxing Dong
 
-   @generated from src/zgetf2_vbatched.cpp, normal z -> d, Tue Oct 27 18:56:33 2026
+   @generated from src/zgetf2_vbatched.cpp, normal z -> d, Tue Oct 27 19:04:58 2026
 */
 #include "magma_internal.h"
 #include "batched_kernel_param.h"
 
-extern "C" magma_int_t
+extern "C" __attribute__((visibility("hidden"))) magma_int_t
 magma_dgetf2_tall_vbatched(
     magma_int_t max_m, magma_int_t max_n,
     magma_int_t *m, magma_int_t *n,
