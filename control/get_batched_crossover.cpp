@@ -14,6 +14,22 @@
 #include "magma_internal.h"
 #include "geqrf_batched_panel_decision.h"
 
+// F-RECNB (magma-hpc F track): optional environment override of the vbatched getrf blocking, read once.
+//   MAGMA_GETRF_VBATCHED_NB    outer panel width (default 32/64/128 by max_m)
+//   MAGMA_GETRF_VBATCHED_RECNB recursion stop width = width of the panel handed to the fused getf2 kernel (default 32).
+// A smaller RECNB lets the fused kernel (shared memory SLDA(m) x RECNB) cover taller panels instead of the per-column
+// izamax/swap/scal-ger launch loop. Unset = stock behaviour.
+#include <cstdlib>
+static void magma_getrf_vbatched_nb_env(magma_int_t *nb, magma_int_t *recnb)
+{
+    static int init = 0; static long env_nb = 0, env_recnb = 0;
+    if (!init) {
+        const char* a = getenv("MAGMA_GETRF_VBATCHED_NB");    if (a) env_nb    = atol(a);
+        const char* b = getenv("MAGMA_GETRF_VBATCHED_RECNB"); if (b) env_recnb = atol(b);
+        init = 1;
+    }
+
+
 
 #ifdef __cplusplus
 ////////////////////////////////////////////////////////////////////////////////
@@ -314,21 +330,6 @@ void magma_get_sgetrf_batched_nbparam(magma_int_t n, magma_int_t *nb, magma_int_
 
 /***************************************************************************//**
     Returns in nb and recnb the crossover points for getrf
-
-// F-RECNB (magma-hpc F track): optional environment override of the vbatched getrf blocking, read once.
-//   MAGMA_GETRF_VBATCHED_NB    outer panel width (default 32/64/128 by max_m)
-//   MAGMA_GETRF_VBATCHED_RECNB recursion stop width = width of the panel handed to the fused getf2 kernel (default 32).
-// A smaller RECNB lets the fused kernel (shared memory SLDA(m) x RECNB) cover taller panels instead of the per-column
-// izamax/swap/scal-ger launch loop. Unset = stock behaviour.
-#include <cstdlib>
-static void magma_getrf_vbatched_nb_env(magma_int_t *nb, magma_int_t *recnb)
-{
-    static int init = 0; static long env_nb = 0, env_recnb = 0;
-    if (!init) {
-        const char* a = getenv("MAGMA_GETRF_VBATCHED_NB");    if (a) env_nb    = atol(a);
-        const char* b = getenv("MAGMA_GETRF_VBATCHED_RECNB"); if (b) env_recnb = atol(b);
-        init = 1;
-    }
     if (env_nb    > 0) *nb    = (magma_int_t) env_nb;
     if (env_recnb > 0) *recnb = (magma_int_t) env_recnb;
     if (*recnb > *nb) *recnb = *nb;
