@@ -350,6 +350,7 @@ void magma_get_cgetrf_vbatched_nbparam(magma_int_t max_m, magma_int_t max_n, mag
     *nb    = (max_m <= 192) ? 32 :
              (max_m <= 384) ? 64 : 128;
     *recnb =  32;
+    magma_getrf_vbatched_nb_env(nb, recnb);
     return;
 }
 
