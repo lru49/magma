@@ -178,6 +178,8 @@ bool magma_zgetrf_native_recommend_notrans(magma_int_t m, magma_int_t n, magma_i
     @ingroup magma_getrf
 *******************************************************************************/
 extern "C" magma_int_t
+// F-TOPLU (magma-hpc F track): the trailing updates of the GPU-only (MagmaNative) and hybrid LU use the OPEN magmablas
+// trsm/gemm kernels instead of the magma_z* wrappers (closed vendor BLAS), so a fully open GPU LU of large single fronts exists.
 magma_zgetrf_expert_gpu_work(
     magma_int_t m, magma_int_t n,
     magmaDoubleComplex_ptr dA, magma_int_t ldda,
@@ -338,11 +340,11 @@ magma_zgetrf_expert_gpu_work(
         }
 
         if ( j > 0 ) {
-            magma_ztrsm( MagmaRight, MagmaUpper, MagmaNoTrans, MagmaUnit,
+            magmablas_ztrsm( MagmaRight, MagmaUpper, MagmaNoTrans, MagmaUnit,
                          n-(j+nb), nb,
                          c_one, dAT(j-nb, j-nb), lddat,
                                 dAT(j-nb, j+nb), lddat, queues[1] );
-            magma_zgemm( MagmaNoTrans, MagmaNoTrans,
+            magmablas_zgemm( MagmaNoTrans, MagmaNoTrans,
                          n-(j+nb), m-j, nb,
                          c_neg_one, dAT(j-nb, j+nb), lddat,
                                     dAT(j,    j-nb), lddat,
@@ -386,22 +388,22 @@ magma_zgetrf_expert_gpu_work(
 
         // do the small non-parallel computations (next panel update)
         if ( j + nb < minmn - nb ) {
-            magma_ztrsm( MagmaRight, MagmaUpper, MagmaNoTrans, MagmaUnit,
+            magmablas_ztrsm( MagmaRight, MagmaUpper, MagmaNoTrans, MagmaUnit,
                          nb, nb,
                          c_one, dAT(j, j   ), lddat,
                                 dAT(j, j+nb), lddat, queues[1] );
-            magma_zgemm( MagmaNoTrans, MagmaNoTrans,
+            magmablas_zgemm( MagmaNoTrans, MagmaNoTrans,
                          nb, m-(j+nb), nb,
                          c_neg_one, dAT(j,    j+nb), lddat,
                                     dAT(j+nb, j   ), lddat,
                          c_one,     dAT(j+nb, j+nb), lddat, queues[1] );
         }
         else {
-            magma_ztrsm( MagmaRight, MagmaUpper, MagmaNoTrans, MagmaUnit,
+            magmablas_ztrsm( MagmaRight, MagmaUpper, MagmaNoTrans, MagmaUnit,
                          n-(j+nb), nb,
                          c_one, dAT(j, j   ), lddat,
                                 dAT(j, j+nb), lddat, queues[1] );
-            magma_zgemm( MagmaNoTrans, MagmaNoTrans,
+            magmablas_zgemm( MagmaNoTrans, MagmaNoTrans,
                          n-(j+nb), m-(j+nb), nb,
                          c_neg_one, dAT(j,    j+nb), lddat,
                                     dAT(j+nb, j   ), lddat,
@@ -443,7 +445,7 @@ magma_zgetrf_expert_gpu_work(
 
         magmablas_ztranspose( rows, jb, dAP(0,0), maxm, dAT(j,j), lddat, queues[1] );
 
-        magma_ztrsm( MagmaRight, MagmaUpper, MagmaNoTrans, MagmaUnit,
+        magmablas_ztrsm( MagmaRight, MagmaUpper, MagmaNoTrans, MagmaUnit,
                      n-j-jb, jb,
                      c_one, dAT(j,j),    lddat,
                             dAT(j,j+jb), lddat, queues[1] );
