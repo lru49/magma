@@ -12,6 +12,7 @@
 */
 #include <mutex>
 #include "magma_internal.h"
+#include "trsm_nrhs1_stop.h"
 
 #define PRECISION_z
 //-------------------------
@@ -41,6 +42,16 @@ magma_ztrsm_nrhs1_update(
     magma_int_t *m, magma_int_t *n,
     magmaDoubleComplex **dA, magma_int_t *ldda, magmaDoubleComplex **dB, magma_int_t *lddb,
     magma_int_t batchCount, magma_queue_t queue);
+
+// G-GEMV2: blocked nrhs=1 leaf, 32 < max_m <= 256 rows, one CTA per matrix (ztrsm_small_vbatched.cu, hidden symbol)
+extern "C" __attribute__((visibility("hidden"))) void
+magma_ztrsm_nrhs1_blk(
+    magma_uplo_t uplo, magma_diag_t diag,
+    magma_int_t max_m, magma_int_t max_n, magma_int_t* m, magma_int_t* n,
+    magmaDoubleComplex alpha,
+    magmaDoubleComplex **dA, magma_int_t Ai, magma_int_t Aj, magma_int_t* ldda,
+    magmaDoubleComplex **dB, magma_int_t Bi, magma_int_t Bj, magma_int_t* lddb,
+    magma_int_t batchCount, magma_queue_t queue );
 
 // recursion; nrhs1_ws != NULL (only for Left/NoTrans with max_n == 1) routes the off-diagonal updates to batched gemv
 static void
@@ -74,8 +85,16 @@ ztrsm_vbatched_core_rec(
 
     // use the fixed-size batched function to get nb
     magma_int_t batrsm_stop_nb = magma_get_ztrsm_batched_stop_nb(side, max_m, max_n);
+    // G-GEMV2: on the nrhs=1 path the recursion stops at trsm_nrhs1_stop() rows (256) instead of 32; leaves of 33..256 rows go to
+    // the blocked one-CTA-per-matrix kernel, which does the sub-block off-diagonal updates inside one launch
+    if (nrhs1_ws) batrsm_stop_nb = max(batrsm_stop_nb, (magma_int_t)trsm_nrhs1_stop());
     // stopping condition
     if(max_nrowA <= batrsm_stop_nb){
+        if (nrhs1_ws && max_nrowA > 32) {
+            magma_ztrsm_nrhs1_blk(uplo, diag, max_m, max_n, m, n, alpha,
+                                  dA_array(Ai, Aj), ldda, dB_array(Bi, Bj), lddb, batchCount, queue );
+            return;
+        }
         magmablas_ztrsm_small_vbatched(
                 side, uplo, transA, diag,
                 max_m, max_n, m, n, alpha,
@@ -381,15 +400,23 @@ magmablas_ztrsm_vbatched_core(
         magmaDoubleComplex **dB_array, magma_int_t Bi, magma_int_t Bj, magma_int_t* lddb,
         magma_int_t batchCount, magma_queue_t queue )
 {
+    // G-GEMV2: ws is the nrhs=1 path flag. A real workspace is allocated only if at least one update node exists
+    // (max_m > trsm_nrhs1_stop() = 256 rows); a block that fits one leaf needs no workspace, so a non-NULL sentinel
+    // (never dereferenced or freed) selects the blocked leaf kernel. If the allocation fails ws stays NULL = original path.
     void *ws = NULL;
-    if (max_m > 0 && max_n == 1 && batchCount > 0 && side == MagmaLeft && transA == MagmaNoTrans &&
-        max_m > magma_get_ztrsm_batched_stop_nb(side, max_m, max_n))   // at least one update happens
+    bool ws_real = false;
+    if (max_m > 0 && max_n == 1 && batchCount > 0 && side == MagmaLeft && transA == MagmaNoTrans)
     {
-        cudaStream_t st = magma_queue_get_cuda_stream(queue);
-        cudaMemPool_t pool = z_trsm_nrhs1_pool();
-        if (pool == NULL || cudaMallocFromPoolAsync(&ws, magma_ztrsm_nrhs1_ws_bytes(batchCount), pool, st) != cudaSuccess) { ws = NULL; cudaGetLastError(); }
+        if (max_m > max(magma_get_ztrsm_batched_stop_nb(side, max_m, max_n), (magma_int_t)trsm_nrhs1_stop()))   // at least one update happens
+        {
+            cudaStream_t st = magma_queue_get_cuda_stream(queue);
+            cudaMemPool_t pool = z_trsm_nrhs1_pool();
+            if (pool == NULL || cudaMallocFromPoolAsync(&ws, magma_ztrsm_nrhs1_ws_bytes(batchCount), pool, st) != cudaSuccess) { ws = NULL; cudaGetLastError(); }
+            else ws_real = true;
+        }
+        else ws = (void*)&ws;   // sentinel: no update node, only the leaf kernel
     }
     ztrsm_vbatched_core_rec(side, uplo, transA, diag, max_m, max_n, m, n, alpha,
                             dA_array, Ai, Aj, ldda, dB_array, Bi, Bj, lddb, batchCount, queue, ws);
-    if (ws) cudaFreeAsync(ws, magma_queue_get_cuda_stream(queue));
+    if (ws_real) cudaFreeAsync(ws, magma_queue_get_cuda_stream(queue));
 }

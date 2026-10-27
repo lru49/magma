@@ -16,6 +16,7 @@
 #define PRECISION_z
 #include "trsm_template_kernel_vbatched.cuh"
 #include "trsm_nrhs1_warp.cuh"
+#include "trsm_nrhs1_blk.cuh"
 #include "./trsm_config/ztrsm_param.h"
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -65,3 +66,17 @@ magmablas_ztrsm_small_vbatched(
     }
 }
 
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// G-GEMV2: nrhs = 1 blocked leaf (32 < max_m <= 256), one CTA per matrix, called by ztrsm_vbatched_core.cpp (hidden symbol)
+extern "C" __attribute__((visibility("hidden"))) void
+magma_ztrsm_nrhs1_blk(
+        magma_uplo_t uplo, magma_diag_t diag,
+        magma_int_t max_m, magma_int_t max_n, magma_int_t* m, magma_int_t* n,
+        magmaDoubleComplex alpha,
+        magmaDoubleComplex **dA_array, magma_int_t Ai, magma_int_t Aj, magma_int_t* ldda,
+        magmaDoubleComplex **dB_array, magma_int_t Bi, magma_int_t Bj, magma_int_t* lddb,
+        magma_int_t batchCount, magma_queue_t queue )
+{
+    trsm_nrhs1_blk_vbatched<magmaDoubleComplex>(uplo, diag, m, n, alpha, dA_array, Ai, Aj, ldda, dB_array, Bi, Bj, lddb,
+                                                max_m, max_n, batchCount, queue );
+}
