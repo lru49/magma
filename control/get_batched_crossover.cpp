@@ -28,6 +28,10 @@ static void magma_getrf_vbatched_nb_env(magma_int_t *nb, magma_int_t *recnb)
         const char* b = getenv("MAGMA_GETRF_VBATCHED_RECNB"); if (b) env_recnb = atol(b);
         init = 1;
     }
+    if (env_nb    > 0) *nb    = (magma_int_t) env_nb;
+    if (env_recnb > 0) *recnb = (magma_int_t) env_recnb;
+    if (*recnb > *nb) *recnb = *nb;
+}
 
 
 
@@ -330,10 +334,6 @@ void magma_get_sgetrf_batched_nbparam(magma_int_t n, magma_int_t *nb, magma_int_
 
 /***************************************************************************//**
     Returns in nb and recnb the crossover points for getrf
-    if (env_nb    > 0) *nb    = (magma_int_t) env_nb;
-    if (env_recnb > 0) *recnb = (magma_int_t) env_recnb;
-    if (*recnb > *nb) *recnb = *nb;
-}
 
 *******************************************************************************/
 void magma_get_zgetrf_vbatched_nbparam(magma_int_t max_m, magma_int_t max_n, magma_int_t *nb, magma_int_t *recnb)
