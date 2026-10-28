@@ -4,7 +4,7 @@
        for the per-column path of the batched variable-size getf2 (sgetf2_vbatched_v1).
        Own translation unit (sgetf2_kernels_var.cu takes minutes to compile).
 
-       @generated from magmablas/zgetf2_onlinepiv_vbatched.cu, normal z -> s, Tue Oct 27 22:04:46 2026
+       @generated from magmablas/zgetf2_onlinepiv_vbatched.cu, normal z -> s, Tue Oct 27 23:30:03 2026
 */
 #include "magma_internal.h"
 #include "batched_kernel_param.h"
@@ -46,8 +46,8 @@ sscal_sger_1d_onlinepiv_kernel_vbatched(
     const int batchid = blockIdx.z;
     const int tx  = threadIdx.x;
     const int gtx = blockIdx.x * blockDim.x + tx;
-    __shared__ float sx[ONLINEPIV_TBX];
-    __shared__ int    si[ONLINEPIV_TBX];
+    __shared__ float sx[ONLINEPIV_TBX / 32];
+    __shared__ int    si[ONLINEPIV_TBX / 32];
 
     int my_M    = (int)M[batchid];
     int my_N    = (int)N[batchid];
@@ -86,12 +86,21 @@ sscal_sger_1d_onlinepiv_kernel_vbatched(
             r = gtx - 1;                                                // row relative to the first row of column j+1
         }
     }
-    sx[tx] = v;
-    si[tx] = r;
-    magma_getidmax<ONLINEPIV_TBX>(tx, sx, si);                          // (max value, smallest index); syncs inside
+    // (max value, smallest index) reduce: warp shuffles, then the 8 warp results by thread 0 (order independent)
+    #pragma unroll
+    for (int o = 16; o > 0; o >>= 1) {
+        float ov = __shfl_xor_sync(0xffffffff, v, o);
+        int    oi = __shfl_xor_sync(0xffffffff, r, o);
+        if ( ov > v || (ov == v && oi < r) ) { v = ov; r = oi; }
+    }
+    if ((tx & 31) == 0) { sx[tx >> 5] = v; si[tx >> 5] = r; }
+    __syncthreads();
     if (tx == 0) {
-        pval[batchid * npart + blockIdx.x] = sx[0];
-        pidx[batchid * npart + blockIdx.x] = si[0];
+        #pragma unroll
+        for (int w = 1; w < ONLINEPIV_TBX / 32; w++)
+            if ( sx[w] > v || (sx[w] == v && si[w] < r) ) { v = sx[w]; r = si[w]; }
+        pval[batchid * npart + blockIdx.x] = v;
+        pidx[batchid * npart + blockIdx.x] = r;
     }
 }
 
@@ -140,8 +149,6 @@ void sswap_onlinepiv_kernel_vbatched(
     const int step    = piv_adjustment;
     const int Ajc     = Aj + piv_adjustment;          // the column's own column index (isamax was called at (Ai, Ajc))
 
-    __shared__ float sx[zamax];
-    __shared__ int    si[zamax];
     __shared__ int    jp;
 
     // ---- isamax_kernel_vbatched part: same guard, same outputs
@@ -156,23 +163,28 @@ void sswap_onlinepiv_kernel_vbatched(
 #ifdef MAGMA_PLANT_ONLINE_PIVOT
         if (pm > 1) pm -= 1;                            // PLANT: the last tile of every matrix is never searched
 #endif
-        const float *mv = pval + (size_t)batchid * npart;
-        const int    *mi = pidx + (size_t)batchid * npart;
-        float v = MAGMA_D_ZERO;
-        int    r = INT_MAX;
-        for (int p = tx; p < pm; p += zamax) {
-            float pv = mv[p];
-            int    pi = mi[p];
-            if ( pv > v || (pv == v && pi < r) ) { v = pv; r = pi; }
-        }
-        sx[tx] = v;
-        si[tx] = r;
-        magma_getidmax_n(min(zamax, pm), tx, sx, si);   // syncs inside
-        if (tx == 0) {
-            jp = si[0];
-            *ipiv = si[0] + step + 1;                   // Fortran indexing & adjust pivot
-            linfo = ( sx[0] == MAGMA_D_ZERO && linfo == 0) ? (si[0]+step+gbstep+1) : linfo;
-            *info = (magma_int_t)linfo;
+        if (tx < 32) {                                  // one warp: lanes strided over the tiles, then shuffle (max, min idx)
+            const float *mv = pval + (size_t)batchid * npart;
+            const int    *mi = pidx + (size_t)batchid * npart;
+            float v = MAGMA_D_ZERO;
+            int    r = INT_MAX;
+            for (int p = tx; p < pm; p += 32) {
+                float pv = mv[p];
+                int    pi = mi[p];
+                if ( pv > v || (pv == v && pi < r) ) { v = pv; r = pi; }
+            }
+            #pragma unroll
+            for (int o = 16; o > 0; o >>= 1) {
+                float ov = __shfl_xor_sync(0xffffffff, v, o);
+                int    oi = __shfl_xor_sync(0xffffffff, r, o);
+                if ( ov > v || (ov == v && oi < r) ) { v = ov; r = oi; }
+            }
+            if (tx == 0) {
+                jp = r;
+                *ipiv = r + step + 1;                       // Fortran indexing & adjust pivot
+                linfo = ( v == MAGMA_D_ZERO && linfo == 0) ? (r+step+gbstep+1) : linfo;
+                *info = (magma_int_t)linfo;
+            }
         }
     }
 
