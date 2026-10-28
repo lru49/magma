@@ -177,7 +177,7 @@ magma_zgetf2_vbatched(
                 batchCount, queue);
     if(arginfo == 0) return arginfo;
 
-    // F-TALLPANEL: one fused CTA per matrix for panels too tall for the fused kernels (MAGMA_GETF2_TALL=0 disables)
+    // F-TALLPANEL: one fused CTA per matrix for panels too tall for the fused kernels (default off; MAGMA_GETF2_TALL=1 enables)
     arginfo = magma_zgetf2_tall_vbatched(
                 max_m, max_n, m, n,
                 dA_array, Ai, Aj, ldda,

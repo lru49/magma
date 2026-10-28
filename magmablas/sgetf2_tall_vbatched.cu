@@ -95,7 +95,7 @@ magma_sgetf2_tall_vbatched(
 {
     if (max_n > SGETF2_TALL_MAX_N || max_m > SGETF2_TALL_MAX_M || max_m < 1) return -1;
     static int enabled = -1;
-    if (enabled < 0) { const char* e = getenv("MAGMA_GETF2_TALL"); enabled = (e && atoi(e) == 0) ? 0 : 1; }
+    if (enabled < 0) { const char* e = getenv("MAGMA_GETF2_TALL"); enabled = (e && atoi(e) != 0) ? 1 : 0; }  // default OFF (NO-GO window 103/112); MAGMA_GETF2_TALL=1 enables
     if (!enabled) return -1;
     const size_t shmem = zamax * sizeof(float) + zamax * sizeof(int) + SGETF2_TALL_MAX_N * sizeof(float);
     const magma_int_t max_batch = 65535;
