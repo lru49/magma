@@ -18,6 +18,7 @@
 */
 #include "magma_internal.h"
 #include "magma_templates.h"
+#include "trsm_template_kernel_vbatched.cuh"   // make_FloatingPoint, div, shfl helpers
 #include "trsm_nrhs1_warp.cuh"
 #include "trsm_nrhs1_blk.cuh"
 #include <cstdlib>
