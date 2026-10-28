@@ -8,11 +8,12 @@
    @author Azzam Haidar
    @author Tingxing Dong
 
-   @generated from src/zgetf2_vbatched.cpp, normal z -> c, Tue Oct 27 22:04:46 2026
+   @generated from src/zgetf2_vbatched.cpp, normal z -> c, Tue Oct 27 22:48:19 2026
 */
 #include "magma_internal.h"
 #include "batched_kernel_param.h"
 #include <cstdlib>
+#include <cstdio>
 
 extern "C" __attribute__((visibility("hidden"))) magma_int_t
 magma_cgetf2_tall_vbatched(
@@ -80,6 +81,12 @@ magma_cgetf2_vbatched_v1(
         pidx = (int*)(scratch + (size_t)pcap * sizeof(float));
     }
     magma_int_t have_partials = 0, npart_prev = 0, germ_prev = 0;
+    {   // MAGMA_GETF2_ONLINE_PIVOT_LOG=1: which panels reach the per-column path (first 64 calls per process)
+        static int logmode = -1, logged = 0;
+        if (logmode < 0) { const char *e = getenv("MAGMA_GETF2_ONLINE_PIVOT_LOG"); logmode = (e && atoi(e) == 1) ? 1 : 0; }
+        if (logmode && logged < 64) { logged++; fprintf(stderr, "MAGMA_GETF2_V1 max_m=%lld max_n=%lld max_minmn=%lld batch=%lld online=%d tiles=%lld\n",
+            (long long)max_m, (long long)max_n, (long long)max_minmn, (long long)batchCount, online, (long long)magma_ceildiv(max_m, 256)); }
+    }
 
     for(j=0; j < max_minmn; j+=nb) {
         // panel (the swap is done on the entire width)
