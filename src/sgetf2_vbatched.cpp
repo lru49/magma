@@ -48,7 +48,7 @@ static int sgetf2_online_pivot_mode()
     static int mode = -1;
     if (mode < 0) {
         const char *e = getenv("MAGMA_GETF2_ONLINE_PIVOT");
-        mode = (e && atoi(e) == 1) ? 1 : 0;                 // default OFF: the per-column path is untouched
+        mode = (e && atoi(e) == 0) ? 0 : 1;                 // default ON (adopted, window 121); MAGMA_GETF2_ONLINE_PIVOT=0 disables
     }
     return mode;
 }

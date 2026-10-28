@@ -25,7 +25,7 @@ magma_zgetf2_tall_vbatched(
     magma_int_t batchCount, magma_queue_t queue);
 
 // F-ONLINEPIVOT (magmablas/zgetf2_onlinepiv_vbatched.cu): update kernel that also emits per-tile pivot partials of the
-// next column, and the swap kernel that reduces them (replaces the izamax launch); MAGMA_GETF2_ONLINE_PIVOT=1 enables.
+// next column, and the swap kernel that reduces them (replaces the izamax launch); default ON, MAGMA_GETF2_ONLINE_PIVOT=0 disables.
 extern "C" __attribute__((visibility("hidden"))) magma_int_t
 magma_zscal_zgeru_onlinepiv_vbatched(
         magma_int_t max_M, magma_int_t max_N,
@@ -48,7 +48,7 @@ static int zgetf2_online_pivot_mode()
     static int mode = -1;
     if (mode < 0) {
         const char *e = getenv("MAGMA_GETF2_ONLINE_PIVOT");
-        mode = (e && atoi(e) == 1) ? 1 : 0;                 // default OFF: the per-column path is untouched
+        mode = (e && atoi(e) == 0) ? 0 : 1;                 // default ON (adopted, window 121); MAGMA_GETF2_ONLINE_PIVOT=0 disables
     }
     return mode;
 }
