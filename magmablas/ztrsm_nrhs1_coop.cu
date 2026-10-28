@@ -182,7 +182,7 @@ void trsm_nrhs1_coop_kernel(
 
 static inline bool trsm_nrhs1_coop_enabled()
 {
-    static const bool on = []() { const char *e = getenv("MAGMA_TRSM_NRHS1_COOP"); return !(e && atoi(e) == 0); }();
+    static const bool on = []() { const char *e = getenv("MAGMA_TRSM_NRHS1_COOP"); return (e && atoi(e) == 1); }();   // default OFF (window 109 NO-GO)
     return on;
 }
 
