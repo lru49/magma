@@ -31,10 +31,11 @@
 
 /******************************************************************************/
 // F-SGEMM-TILE: zero-risk settings screen for the float NN vbatched kernel.
-//   MAGMA_SGEMM_VBATCHED_NN_VERSION=<tag>  forces ONE kernel version for every float vbatched NN call
-//                                          (read once; unset / unknown tag => the default dispatch below is unchanged).
-//   MAGMA_SGEMM_VBATCHED_NN_MIN_MN=<n>     apply the forced version only to calls with min(max_m, max_n) >= n
-//                                          (default 0 = every call; use it to leave the tiny getrf panel calls alone).
+//   MAGMA_SGEMM_VBATCHED_NN_VERSION=<tag>  forces ONE kernel version for every float vbatched NN call above MIN_MN
+//                                          (read once; unset => CUTLASS (adopted default); DEFAULT or 0 => stock dispatch;
+//                                          unknown tag => stock dispatch with a message).
+//   MAGMA_SGEMM_VBATCHED_NN_MIN_MN=<n>     apply the forced/default version only to calls with min(max_m, max_n) >= n
+//                                          (default 64: the tiny getrf panel calls keep the stock dispatch).
 //   MAGMA_SGEMM_VBATCHED_NN_LOG=1          prints one line per float vbatched NN call to stderr (census).
 // <tag> is an index of magmablas/gemm_config/sgemm_param_nn.h (NN_V_<tag>) that is instantiated in the list below,
 // or one of the off-table tiles X1..X3 defined here. The template parameters are
@@ -69,17 +70,24 @@ int magmablas_sgemm_vbatched_nn_cutlass(
     float               **dC_array, magma_int_t Ci, magma_int_t Cj, magma_int_t* lddc,
     magma_int_t batchCount, magma_queue_t queue );
 
+// F-SGEMM-CUTLASS adopted (fp32-7*, window 118): the DEFAULT for float vbatched NN calls with min(max_m, max_n) >= 64 is now
+// the CUTLASS grouped GEMM (tag CUTLASS = 128x64x8). MAGMA_SGEMM_VBATCHED_NN_VERSION=DEFAULT (or 0) restores the stock
+// MAGMA dispatch for every call; the other tags force one version as before. MAGMA_SGEMM_VBATCHED_NN_MIN_MN defaults to 64.
+#define SGEMM_VB_NN_DEFAULT_CODE   20000   /* CUTLASS */
+#define SGEMM_VB_NN_DEFAULT_MIN_MN 64
+
 static int sgemm_vbatched_nn_forced_version()
 {
-    // -1 = unset (default dispatch), otherwise the numeric code of the forced version
+    // -1 = stock MAGMA dispatch, otherwise the numeric code of the version used above MIN_MN
     static const int forced = []() -> int {
         const char* e = getenv("MAGMA_SGEMM_VBATCHED_NN_VERSION");
-        if (e == NULL || *e == '\0') return -1;
+        if (e == NULL || *e == '\0') return SGEMM_VB_NN_DEFAULT_CODE;
+        if (strcmp(e, "DEFAULT") == 0 || strcmp(e, "0") == 0) return -1;
         #define SGEMM_VB_NN_MATCH(tag, code) if (strcmp(e, #tag) == 0) return code;
         SGEMM_VB_NN_FORCED_VERSIONS(SGEMM_VB_NN_MATCH)
         SGEMM_VB_NN_CUTLASS_VERSIONS(SGEMM_VB_NN_MATCH)
         #undef SGEMM_VB_NN_MATCH
-        fprintf(stderr, "MAGMA_SGEMM_VBATCHED_NN_VERSION=%s unknown; using the default dispatch. Known tags:", e);
+        fprintf(stderr, "MAGMA_SGEMM_VBATCHED_NN_VERSION=%s unknown; using the stock MAGMA dispatch. Known tags: DEFAULT", e);
         #define SGEMM_VB_NN_LIST(tag, code) fprintf(stderr, " %s", #tag);
         SGEMM_VB_NN_FORCED_VERSIONS(SGEMM_VB_NN_LIST)
         SGEMM_VB_NN_CUTLASS_VERSIONS(SGEMM_VB_NN_LIST)
@@ -94,7 +102,7 @@ static magma_int_t sgemm_vbatched_nn_forced_min_mn()
 {
     static const magma_int_t min_mn = []() -> magma_int_t {
         const char* e = getenv("MAGMA_SGEMM_VBATCHED_NN_MIN_MN");
-        return (e == NULL || *e == '\0') ? 0 : (magma_int_t) atoll(e);
+        return (e == NULL || *e == '\0') ? SGEMM_VB_NN_DEFAULT_MIN_MN : (magma_int_t) atoll(e);
     }();
     return min_mn;
 }
