@@ -17,6 +17,7 @@
        @precisions normal z -> s d c
 */
 #include "magma_internal.h"
+#define PRECISION_z
 #include "magma_templates.h"
 #include "trsm_template_kernel_vbatched.cuh"   // make_FloatingPoint, div, shfl helpers
 #include "trsm_nrhs1_warp.cuh"

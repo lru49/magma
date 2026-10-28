@@ -14,9 +14,10 @@
        never wait on it, and the cooperative launch guarantees co-residency (else the caller falls back).
        MAGMA_TRSM_NRHS1_COOP=0 disables (A/B fallback inside one library).
 
-       @generated from magmablas/ztrsm_nrhs1_coop.cu, normal z -> c, Tue Oct 27 20:27:34 2026
+       @generated from magmablas/ztrsm_nrhs1_coop.cu, normal z -> c, Tue Oct 27 20:30:47 2026
 */
 #include "magma_internal.h"
+#define PRECISION_c
 #include "magma_templates.h"
 #include "trsm_template_kernel_vbatched.cuh"   // make_FloatingPoint, div, shfl helpers
 #include "trsm_nrhs1_warp.cuh"
