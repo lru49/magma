@@ -14,8 +14,8 @@
     call because kernels on one stream are ordered). C = alpha*A*B + beta*C with the same per-element FMA order
     as MAGMA's kernel, so results are bit-identical to the default dispatch (verified in bench/sgemm-cutlass).
 
-    MAGMA_SGEMM_CUTLASS_PLANT (compile-time, verification only): drops the last k term of the LAST problem of every
-    call -> the solve compare must FAIL.
+    MAGMA_SGEMM_CUTLASS_PLANT (compile-time, verification only): the LAST problem of every call gets no update
+    (its tiles are skipped) -> the solve compare must FAIL.
 */
 // std and CUTLASS headers first: magma_internal.h defines min/max function-like macros that break <chrono>/<limits>
 #include <cstdint>
@@ -104,7 +104,7 @@ __global__ void sgemm_vbatched_cutlass_setup_kernel(
     const float* A = Aarray[b]; const float* B = Barray[b]; float* C = Carray[b];
     if (A == NULL || B == NULL || C == NULL) skip = true;
 #ifdef MAGMA_SGEMM_CUTLASS_PLANT
-    if (b == batchCount - 1 && my_K > 1) my_K -= 1;   // PLANT: last problem loses one rank-1 term
+    if (b == batchCount - 1) skip = true;   // PLANT: the last problem of every call gets no update at all (alpha = 0)
 #endif
     const int64_t lda = (int64_t)LDA[b], ldb = (int64_t)LDB[b], ldc = (int64_t)LDC[b];
     if (skip) { my_M = 0; my_N = 0; my_K = 0; }
