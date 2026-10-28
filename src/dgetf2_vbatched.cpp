@@ -8,10 +8,11 @@
    @author Azzam Haidar
    @author Tingxing Dong
 
-   @generated from src/zgetf2_vbatched.cpp, normal z -> d, Tue Oct 27 19:04:58 2026
+   @generated from src/zgetf2_vbatched.cpp, normal z -> d, Tue Oct 27 22:04:46 2026
 */
 #include "magma_internal.h"
 #include "batched_kernel_param.h"
+#include <cstdlib>
 
 extern "C" __attribute__((visibility("hidden"))) magma_int_t
 magma_dgetf2_tall_vbatched(
@@ -21,6 +22,35 @@ magma_dgetf2_tall_vbatched(
     magma_int_t **ipiv_array, magma_int_t ipiv_i,
     magma_int_t *info_array, magma_int_t gbstep,
     magma_int_t batchCount, magma_queue_t queue);
+
+// F-ONLINEPIVOT (magmablas/dgetf2_onlinepiv_vbatched.cu): update kernel that also emits per-tile pivot partials of the
+// next column, and the swap kernel that reduces them (replaces the idamax launch); MAGMA_GETF2_ONLINE_PIVOT=1 enables.
+extern "C" __attribute__((visibility("hidden"))) magma_int_t
+magma_dscal_dger_onlinepiv_vbatched(
+        magma_int_t max_M, magma_int_t max_N,
+        magma_int_t *M, magma_int_t *N,
+        double **dA_array, magma_int_t Ai, magma_int_t Aj, magma_int_t *ldda,
+        magma_int_t *info_array, magma_int_t step, magma_int_t gbstep,
+        double *pval, int *pidx, magma_int_t npart,
+        magma_int_t batchCount, magma_queue_t queue);
+extern "C" __attribute__((visibility("hidden"))) magma_int_t
+magma_dswap_onlinepiv_vbatched(
+        magma_int_t max_n, magma_int_t *M, magma_int_t *N,
+        double **dA_array, magma_int_t Ai, magma_int_t Aj, magma_int_t *ldda,
+        magma_int_t** ipiv_array, magma_int_t piv_adjustment,
+        magma_int_t *info_array, magma_int_t gbstep,
+        const double *pval, const int *pidx, magma_int_t npart, magma_int_t ger_max_m,
+        magma_int_t batchCount, magma_queue_t queue);
+
+static int dgetf2_online_pivot_mode()
+{
+    static int mode = -1;
+    if (mode < 0) {
+        const char *e = getenv("MAGMA_GETF2_ONLINE_PIVOT");
+        mode = (e && atoi(e) == 1) ? 1 : 0;                 // default OFF: the per-column path is untouched
+    }
+    return mode;
+}
 
 static magma_int_t
 magma_dgetf2_vbatched_v1(
@@ -38,19 +68,46 @@ magma_dgetf2_vbatched_v1(
     magma_int_t j;
     magma_int_t nb = 8;
 
+    // F-ONLINEPIVOT scratch: the queue's idle dCarray (maxBatch pointers) holds the per-tile partials between the update
+    // kernel of column j and the swap kernel of column j+1 (nothing else is enqueued on this queue in between).
+    const int online = dgetf2_online_pivot_mode();
+    double *pval = NULL; int *pidx = NULL; magma_int_t pcap = 0;
+    if (online) {
+        size_t bytes = (size_t)queue->get_maxBatch() * sizeof(void*);
+        pcap = (magma_int_t)(bytes / (sizeof(double) + sizeof(int)));
+        char *scratch = (char*)queue->get_dCarray();
+        pval = (double*)scratch;
+        pidx = (int*)(scratch + (size_t)pcap * sizeof(double));
+    }
+    magma_int_t have_partials = 0, npart_prev = 0, germ_prev = 0;
+
     for(j=0; j < max_minmn; j+=nb) {
         // panel (the swap is done on the entire width)
         magma_int_t ib = min(nb, max_minmn-j);
         for(magma_int_t jj = 0; jj < ib; jj++) {
             magma_int_t gbj = j+jj;
-            // idamax
-            magma_idamax_vbatched(max_m-gbj, m, n, dA_array(Ai+gbj, Aj+gbj), ldda, ipiv_array(Ai+gbj), info_array, gbj, gbstep, batchCount, queue);
+            // idamax (skipped when the previous update kernel emitted the pivot partials of this column)
+            if (!have_partials)
+                magma_idamax_vbatched(max_m-gbj, m, n, dA_array(Ai+gbj, Aj+gbj), ldda, ipiv_array(Ai+gbj), info_array, gbj, gbstep, batchCount, queue);
 
-            // dswap
-            magma_dswap_vbatched(max_n, m, n, dA_array(Ai+gbj, Aj), ldda, ipiv_array, gbj, batchCount, queue);
+            // dswap (the online variant first reduces the partials to ipiv/info exactly as idamax would)
+            if (have_partials)
+                magma_dswap_onlinepiv_vbatched(max_n, m, n, dA_array(Ai+gbj, Aj), ldda, ipiv_array, gbj, info_array, gbstep,
+                                               pval, pidx, npart_prev, germ_prev, batchCount, queue);
+            else
+                magma_dswap_vbatched(max_n, m, n, dA_array(Ai+gbj, Aj), ldda, ipiv_array, gbj, batchCount, queue);
 
-            // scal+ger
-            magma_dscal_dger_vbatched( max_m-gbj, ib-jj, m, n, dA_array(Ai+gbj, Aj+gbj), ldda, info_array, gbj, gbstep, batchCount, queue);
+            // scal+ger (+ pivot partials of column gbj+1 when it belongs to this block and the scratch holds them)
+            magma_int_t germ = max_m-gbj, npart = magma_ceildiv(germ, 256);
+            if (online && jj < ib-1 && germ >= 2 && batchCount*npart <= pcap) {
+                magma_dscal_dger_onlinepiv_vbatched( germ, ib-jj, m, n, dA_array(Ai+gbj, Aj+gbj), ldda, info_array, gbj, gbstep,
+                                                      pval, pidx, npart, batchCount, queue);
+                have_partials = 1; npart_prev = npart; germ_prev = germ;
+            }
+            else {
+                magma_dscal_dger_vbatched( germ, ib-jj, m, n, dA_array(Ai+gbj, Aj+gbj), ldda, info_array, gbj, gbstep, batchCount, queue);
+                have_partials = 0;
+            }
         }
 
         // trsm
