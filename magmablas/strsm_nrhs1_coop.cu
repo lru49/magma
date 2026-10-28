@@ -14,7 +14,7 @@
        never wait on it, and the cooperative launch guarantees co-residency (else the caller falls back).
        MAGMA_TRSM_NRHS1_COOP=0 disables (A/B fallback inside one library).
 
-       @generated from magmablas/ztrsm_nrhs1_coop.cu, normal z -> s, Tue Oct 27 20:30:47 2026
+       @generated from magmablas/ztrsm_nrhs1_coop.cu, normal z -> s, Tue Oct 27 20:46:18 2026
 */
 #include "magma_internal.h"
 #define PRECISION_s
@@ -182,7 +182,7 @@ void trsm_nrhs1_coop_kernel(
 
 static inline bool trsm_nrhs1_coop_enabled()
 {
-    static const bool on = []() { const char *e = getenv("MAGMA_TRSM_NRHS1_COOP"); return !(e && atoi(e) == 0); }();
+    static const bool on = []() { const char *e = getenv("MAGMA_TRSM_NRHS1_COOP"); return (e && atoi(e) == 1); }();   // default OFF (window 109 NO-GO)
     return on;
 }
 
