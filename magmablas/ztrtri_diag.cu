@@ -101,7 +101,9 @@ magmablas_ztrtri_diag(
     
     int nblocks = magma_ceildiv( n, IB );
 
-    cudaMemset( d_dinvA, 0, magma_roundup( n, NB )*NB * sizeof(magmaDoubleComplex) );
+    // F-GRAPH (magma-hpc): stream-ordered memset on the queue's stream (the synchronous cudaMemset went through the
+    // legacy default stream, which cannot be used while the queue's stream is being captured into a CUDA graph)
+    cudaMemsetAsync( d_dinvA, 0, magma_roundup( n, NB )*NB * sizeof(magmaDoubleComplex), queue->cuda_stream() );
     
     if ( uplo == MagmaLower ) {
         // invert diagonal IB x IB inner blocks
