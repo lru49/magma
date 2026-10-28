@@ -53,6 +53,14 @@ magma_ztrsm_nrhs1_blk(
     magmaDoubleComplex **dB, magma_int_t Bi, magma_int_t Bj, magma_int_t* lddb,
     magma_int_t batchCount, magma_queue_t queue );
 
+extern "C" __attribute__((visibility("hidden"))) magma_int_t
+magma_ztrsm_nrhs1_coop(
+        magma_uplo_t uplo, magma_diag_t diag,
+        magma_int_t max_m, magma_int_t max_n, magma_int_t* m, magma_int_t* n,
+        magmaDoubleComplex alpha,
+        magmaDoubleComplex **dA_array, magma_int_t Ai, magma_int_t Aj, magma_int_t* ldda,
+        magmaDoubleComplex **dB_array, magma_int_t Bi, magma_int_t Bj, magma_int_t* lddb,
+        magma_int_t batchCount, magma_queue_t queue );
 // recursion; nrhs1_ws != NULL (only for Left/NoTrans with max_n == 1) routes the off-diagonal updates to batched gemv
 static void
 ztrsm_vbatched_core_rec(
@@ -88,6 +96,13 @@ ztrsm_vbatched_core_rec(
     // G-GEMV2: on the nrhs=1 path the recursion stops at trsm_nrhs1_stop() rows (256) instead of 32; leaves of 33..256 rows go to
     // the blocked one-CTA-per-matrix kernel, which does the sub-block off-diagonal updates inside one launch
     if (nrhs1_ws) batrsm_stop_nb = max(batrsm_stop_nb, (magma_int_t)trsm_nrhs1_stop());
+    // S-TOPCHAIN: a tall single-RHS triangular solve (Left/NoTrans, n > the leaf size) goes to one cooperative
+    // kernel per batch instead of the recursion (falls back when the launch cannot be made co-resident)
+    if (nrhs1_ws && (shape == 0 || shape == 1) && max_nrowA > batrsm_stop_nb) {
+        if (magma_ztrsm_nrhs1_coop(uplo, diag, max_m, max_n, m, n, alpha,
+                                   dA_array(Ai, Aj), ldda, dB_array(Bi, Bj), lddb, batchCount, queue) == 0)
+            return;
+    }
     // stopping condition
     if(max_nrowA <= batrsm_stop_nb){
         if (nrhs1_ws && max_nrowA > 32) {
